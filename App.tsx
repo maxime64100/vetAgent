@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useMemo, useContext, createContext } from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,93 @@ import {
   SafeAreaView,
   StatusBar,
   Platform,
+  TextInput,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as SecureStore from 'expo-secure-store';
+import RecorderModal from './src/components/RecorderModal';
 
+// ---------- CONFIG API ----------
+const API_BASE = 'http://192.168.1.158:8000'; // ← remplace par l’IP/URL de ton API
+
+async function apiLogin(email: string, password: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Connexion refusée (${res.status}) ${txt}`);
+  }
+  const json = await res.json();
+  if (!json?.token) throw new Error('Token absent dans la réponse');
+  return json.token as string;
+}
+
+// ---------- AUTH CONTEXT ----------
+type AuthContextType = {
+  token: string | null;
+  restoring: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
+};
+const AuthContext = createContext<AuthContextType>({
+  token: null,
+  restoring: true,
+  login: async () => {},
+  logout: async () => {},
+});
+
+const TOKEN_KEY = 'vetagent_jwt';
+async function saveToken(token: string) {
+  await SecureStore.setItemAsync(TOKEN_KEY, token, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK });
+}
+async function loadToken() {
+  return await SecureStore.getItemAsync(TOKEN_KEY);
+}
+async function clearToken() {
+  await SecureStore.deleteItemAsync(TOKEN_KEY);
+}
+
+function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [token, setToken] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const t = await loadToken();
+        setToken(t);
+      } finally {
+        setRestoring(false);
+      }
+    })();
+  }, []);
+
+  const value = useMemo(
+    () => ({
+      token,
+      restoring,
+      login: async (email: string, password: string) => {
+        const t = await apiLogin(email.trim(), password);
+        await saveToken(t);
+        setToken(t);
+      },
+      logout: async () => {
+        await clearToken();
+        setToken(null);
+      },
+    }),
+    [token, restoring]
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+// ---------- UI ----------
 const colors = {
   bg: '#ffffff',
   text: '#111827',
@@ -20,26 +104,103 @@ const colors = {
   border: '#e5e7eb',
 };
 
-export default function Home() {
+const shadow = Platform.select({
+  ios: {
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowOffset: { width: 0, height: 8 },
+    shadowRadius: 12,
+  },
+  android: { elevation: 2 },
+});
+
+// ---------- LOGIN SCREEN ----------
+function LoginScreen() {
+  const { login } = useContext(AuthContext);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onSubmit() {
+    setError(null);
+    if (!email || !password) return setError('Email et mot de passe requis');
+    try {
+      setBusy(true);
+      await login(email, password);
+    } catch (e: any) {
+      setError(e?.message ?? 'Erreur de connexion');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
+      <StatusBar barStyle="dark-content" />
+      <View style={styles.loginWrap}>
+        <View style={styles.loginCard}>
+          <Text style={styles.title}>Connexion</Text>
+          <Text style={styles.subtitle}>Identifiez-vous pour continuer</Text>
+
+          <View style={{ gap: 10, marginTop: 16 }}>
+            <TextInput
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              placeholder="Email"
+              value={email}
+              onChangeText={setEmail}
+              style={styles.input}
+              placeholderTextColor={colors.muted}
+            />
+            <TextInput
+              secureTextEntry
+              placeholder="Mot de passe"
+              value={password}
+              onChangeText={setPassword}
+              style={styles.input}
+              placeholderTextColor={colors.muted}
+            />
+          </View>
+
+          {!!error && <Text style={styles.error}>{error}</Text>}
+
+          <Pressable
+            onPress={onSubmit}
+            style={({ pressed }) => [styles.btnPrimary, pressed && styles.pressed]}
+            android_ripple={{ color: '#00000010' }}
+          >
+            {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnPrimaryText}>Se connecter</Text>}
+          </Pressable>
+        </View>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+// ---------- HOME SCREEN (ton App.tsx actuel) ----------
+function HomeScreen() {
+  const [recVisible, setRecVisible] = useState(false);
+  const { token, logout } = useContext(AuthContext);
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
       <StatusBar barStyle={Platform.OS === 'ios' ? 'dark-content' : 'dark-content'} />
 
-      <ScrollView
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-      >
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {/* Header */}
         <View style={styles.headerWrap}>
           <View style={styles.avatar}>
             <Ionicons name="medkit-outline" size={28} color={colors.primary} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.title}>Bienvenue Dr. Castillon</Text>
-            <Text style={styles.subtitle}>
-              Gérez vos consultations et suivez vos patients en toute simplicité
-            </Text>
+            <Text style={styles.title}>Bienvenue</Text>
+            <Text style={styles.subtitle}>Gérez vos consultations et suivez vos patients</Text>
           </View>
+          <Pressable onPress={logout} hitSlop={8}>
+            <Text style={{ color: colors.muted }}>Déconnexion</Text>
+          </Pressable>
         </View>
 
         {/* Actions rapides */}
@@ -47,22 +208,18 @@ export default function Home() {
           <Text style={styles.sectionTitle}>Actions rapides</Text>
           <View style={styles.row}>
             <Pressable
-              style={({ pressed }) => [
-                styles.actionCardPrimary,
-                pressed && styles.pressed,
-              ]}
+              style={({ pressed }) => [styles.actionCardPrimary, pressed && styles.pressed]}
               android_ripple={{ color: '#00000010' }}
+              onPress={() => setRecVisible(true)}
             >
               <Ionicons name="add" size={32} color="#fff" />
               <Text style={styles.actionPrimaryText}>Nouveau bilan</Text>
             </Pressable>
 
             <Pressable
-              style={({ pressed }) => [
-                styles.actionCardSecondary,
-                pressed && styles.pressed,
-              ]}
+              style={({ pressed }) => [styles.actionCardSecondary, pressed && styles.pressed]}
               android_ripple={{ color: '#00000010' }}
+              onPress={() => Alert.alert('Recherche', 'À brancher')}
             >
               <Ionicons name="search" size={28} color={colors.text} />
               <Text style={styles.actionSecondaryText}>Rechercher</Text>
@@ -74,7 +231,7 @@ export default function Home() {
         <View style={[styles.section, { marginBottom: 32 }]}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Patients récents</Text>
-            <Pressable hitSlop={8}>
+            <Pressable hitSlop={8} onPress={() => Alert.alert('Voir tout', 'À brancher')}>
               <Text style={styles.link}>Voir tout</Text>
             </Pressable>
           </View>
@@ -98,20 +255,37 @@ export default function Home() {
           ))}
         </View>
       </ScrollView>
+
+      {/* Modal enregistrement vocal */}
+      <RecorderModal
+        visible={recVisible}
+        onClose={() => setRecVisible(false)}
+        uploadUrl={`${API_BASE}/api/consultations/audio`} // adapte si ton endpoint nécessite un ID
+        authToken={token ?? ''}
+        onUploaded={(json) => {
+          console.log('Réponse API:', json);
+        }}
+      />
     </SafeAreaView>
   );
 }
 
-const shadow = Platform.select({
-  ios: {
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowOffset: { width: 0, height: 8 },
-    shadowRadius: 12,
-  },
-  android: { elevation: 2 },
-});
+// ---------- ROOT ----------
+function Root() {
+  const { token, restoring } = useContext(AuthContext);
+  if (restoring) return null; // petit splash natif suffisant
+  return token ? <HomeScreen /> : <LoginScreen />;
+}
 
+export default function App() {
+  return (
+    <AuthProvider>
+      <Root />
+    </AuthProvider>
+  );
+}
+
+// ---------- STYLES ----------
 const styles = StyleSheet.create({
   content: { paddingBottom: 24 },
 
@@ -169,13 +343,6 @@ const styles = StyleSheet.create({
   },
   actionSecondaryText: { color: colors.text, marginTop: 8, fontWeight: '600' },
 
-  patientsHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-
   patientCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -202,4 +369,35 @@ const styles = StyleSheet.create({
   patientOwner: { color: colors.muted },
 
   pressed: { opacity: 0.85 },
+
+  // login
+  loginWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  loginCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: colors.bg,
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    ...(shadow as object),
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    color: colors.text,
+  },
+  btnPrimary: {
+    marginTop: 16,
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  btnPrimaryText: { color: '#fff', fontWeight: '700' },
+  error: { color: '#dc2626', marginTop: 12 },
 });
